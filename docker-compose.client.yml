@@ -1,0 +1,183 @@
+# =============================================================================
+# Nezu HomePilot - Client Composition
+# Vision Onyx V20.5
+# =============================================================================
+# This docker-compose.yml is for CLIENT distribution.
+# Clients download this file and configure their license key.
+#
+# DOCKER HUB PRO MIGRATION:
+# When upgrading to Docker Hub Pro with private repos, change all image URLs:
+# FROM: docker.io/nezuecuador/nezu-xxx:latest
+# TO:   YOUR_PRIVATE_REGISTRY/nezuecuador/nezu-xxx:latest
+#
+# And add login step to installation docs:
+#   docker login -u CLIENT_USERNAME -p CLIENT_PASSWORD
+# =============================================================================
+
+services:
+  # ==========================================================================
+  # CORE INFRASTRUCTURE SERVICES
+  # ==========================================================================
+
+  # Database - Local Private Storage (PostgreSQL 16 LTS)
+  db:
+    image: postgres:16-alpine
+    container_name: nezu-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=nezu_homepilot
+      - POSTGRES_USER=nezu_user
+      - POSTGRES_PASSWORD=nezu_password_secure
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - nezu-network
+
+  # MQTT Broker - Communication backbone
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: nezu-mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    environment:
+      - TZ=America/Guayaquil
+    volumes:
+      - mosquitto-config:/mosquitto/config
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+    networks:
+      - nezu-network
+
+  # Home Assistant - Smart home automation
+  homeassistant:
+    container_name: nezu-homeassistant
+    image: "ghcr.io/home-assistant/home-assistant:stable"
+    restart: unless-stopped
+    privileged: true
+    ports:
+      - "8123:8123"
+    environment:
+      - TZ=America/Guayaquil
+    volumes:
+      - ./homeassistant/config:/config
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        echo "🦅 Nezu Time Warp: Waiting for provisioning sentinel..."
+        until [ -f /config/.nezu_provisioned ]; do
+          echo "⏳ Waiting for Nezu Edge API to write config..."
+          sleep 2
+        done
+        echo "✅ Sentinel detected! Launching Home Assistant..."
+        /init
+    depends_on:
+      edge-api:
+        condition: service_healthy
+    networks:
+      - nezu-network
+
+  # ==========================================================================
+  # NEZU PLATFORM SERVICES
+  # ==========================================================================
+
+  # Edge API - Main backend service
+  # TODO DOCKER HUB PRO: Change to private registry URL
+  edge-api:
+    image: docker.io/nezuecuador/nezu-edge-api:latest
+    container_name: nezu-edge-api
+    restart: always
+    ports:
+      - "5051:8000"
+    depends_on:
+      - mosquitto
+    environment:
+      # ⚠️ REQUIRED: Set your license key here
+      - NEZU_LICENSE_KEY=${NEZU_LICENSE_KEY}
+
+      # System configuration
+      - DJANGO_SETTINGS_MODULE=config.settings
+      - DEBUG=True
+      - SECRET_KEY=${SECRET_KEY:-django-insecure-CHANGE-THIS}
+
+      # Database (Local Private Postgres)
+      - DATABASE_URL=postgres://nezu_user:nezu_password_secure@db:5432/nezu_homepilot
+
+      # Licensing (Remote HQ Validation)
+      - NEZU_CENTRAL_API_URL=https://nezu-homepilot-api.nezuecuador.com
+
+      # Home Assistant
+      - HOMEASSISTANT_URL=http://homeassistant:8123
+      - HOMEASSISTANT_TOKEN=${HOMEASSISTANT_TOKEN:-}
+
+      # MQTT
+      - MQTT_BROKER=mosquitto
+      - MQTT_PORT=1883
+
+      # Links Configuration
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:5050}
+    volumes:
+      - nezu-data:/app/data
+      - ./homeassistant/config:/app/ha_config
+    dns:
+      - 8.8.8.8 # Google DNS (Primary)
+      - 1.1.1.1 # Cloudflare DNS (Fallback)
+    networks:
+      - nezu-network
+
+  # Web UI - Local Dashboard
+  # TODO DOCKER HUB PRO: Change to private registry URL
+  web:
+    image: docker.io/nezuecuador/nezu-web:latest
+    container_name: nezu-web
+    restart: always
+    ports:
+      - "5050:3000"
+    depends_on:
+      edge-api:
+        condition: service_healthy
+    environment:
+      - NEXT_PUBLIC_API_URL=/api
+      - EDGE_API_URL=http://edge-api:8000
+    networks:
+      - nezu-network
+
+  # MQTT Bridge - HA to Nezu translator
+  # TODO DOCKER HUB PRO: Change to private registry URL
+  mqtt-bridge:
+    image: docker.io/nezuecuador/nezu-mqtt-bridge:latest
+    container_name: nezu-mqtt-bridge
+    restart: always
+    depends_on:
+      edge-api:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+      homeassistant:
+        condition: service_started
+    environment:
+      - MQTT_BROKER=mosquitto
+      - MQTT_PORT=1883
+      - HA_WS_URL=ws://homeassistant:8123/api/websocket
+      - HA_TOKEN=${HOMEASSISTANT_TOKEN:-}
+    networks:
+      - nezu-network
+
+# =============================================================================
+# PERSISTENT VOLUMES
+# =============================================================================
+volumes:
+  mosquitto-config:
+  mosquitto-data:
+  mosquitto-log:
+  nezu-data:
+  postgres-data:
+
+    # =============================================================================
+    # NETWORKS
+    # =============================================================================
+networks:
+  nezu-network:
+    driver: bridge
