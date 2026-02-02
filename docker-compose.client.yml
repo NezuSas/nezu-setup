@@ -1,6 +1,6 @@
 # =============================================================================
 # Nezu HomePilot - Client Composition
-# Vision Onyx V20.5
+# Vision Onyx V21.0
 # =============================================================================
 # This docker-compose.yml is for CLIENT distribution.
 # Clients download this file and configure their license key.
